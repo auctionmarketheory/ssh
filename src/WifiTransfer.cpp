@@ -219,16 +219,26 @@ void writeServerScript() {
 
 std::string getIP() {
     std::string ip = "";
-    FILE* fp = popen("hostname -I | awk '{print $1}'", "r");
-    if (fp) {
-        char buf[64];
-        if (fgets(buf, sizeof(buf), fp) != nullptr) {
-            ip = buf;
-            // Trim newline
-            while (!ip.empty() && (ip.back() == '\n' || ip.back() == '\r' || ip.back() == ' '))
-                ip.pop_back();
+    // Try multiple methods for busybox/linux compatibility
+    const char* cmds[] = {
+        "ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \\K\\S+'",
+        "ip addr show wlan0 2>/dev/null | grep -w inet | awk '{print $2}' | cut -d/ -f1",
+        "ifconfig wlan0 2>/dev/null | grep 'inet addr' | cut -d: -f2 | awk '{print $1}'",
+        "hostname -I 2>/dev/null | awk '{print $1}'"
+    };
+    
+    for (int i = 0; i < 4; ++i) {
+        FILE* fp = popen(cmds[i], "r");
+        if (fp) {
+            char buf[64];
+            if (fgets(buf, sizeof(buf), fp) != nullptr) {
+                ip = buf;
+                while (!ip.empty() && (ip.back() == '\n' || ip.back() == '\r' || ip.back() == ' '))
+                    ip.pop_back();
+            }
+            pclose(fp);
+            if (!ip.empty()) break;
         }
-        pclose(fp);
     }
     return ip;
 }
@@ -307,24 +317,24 @@ void drawCyberpunkHUD() {
     // Footer text
     std::string footerText;
     if (app.state == STATE_IDLE) {
-        footerText = "[A] BAT SERVER     [B] THOAT";
+        footerText = "[A] START SERVER     [B] EXIT";
     } else if (app.state == STATE_SERVING) {
-        footerText = "[X/Y] MENU     [B] STOP & THOAT";
+        footerText = "[X/Y] MENU     [B] STOP & EXIT";
     } else if (app.state == STATE_MENU) {
-        footerText = "[A/X] CHON     [B] DONG MENU";
+        footerText = "[A/X] SELECT     [B] CLOSE MENU";
     }
     drawText(font_texture, cdata, footerText, 10, SCREEN_HEIGHT - 12, {COLOR_TEXT_MAGENTA});
 }
 
 void drawIdle() {
-    drawText(font_texture, cdata, "Ket noi Wi-Fi truoc khi bat server.", 20, 80, {COLOR_TEXT_NORMAL});
+    drawText(font_texture, cdata, "Please connect to Wi-Fi before starting.", 20, 80, {COLOR_TEXT_NORMAL});
     
     std::string ip = getIP();
     if (ip.empty()) {
-        drawText(font_texture, cdata, "[KHONG TIM THAY IP - VUI LONG KET NOI WIFI]", 20, 120, {COLOR_TEXT_RED});
+        drawText(font_texture, cdata, "[NO IP FOUND - CHECK WI-FI CONNECTION]", 20, 120, {COLOR_TEXT_RED});
     } else {
-        drawText(font_texture, cdata, "IP Hien Tai: " + ip, 20, 120, {COLOR_TEXT_CYAN});
-        drawText(font_texture, cdata, "Bam [A] de bat server.", 20, 160, {COLOR_TEXT_YELLOW});
+        drawText(font_texture, cdata, "Current IP: " + ip, 20, 120, {COLOR_TEXT_CYAN});
+        drawText(font_texture, cdata, "Press [A] to start server.", 20, 160, {COLOR_TEXT_YELLOW});
     }
 }
 
@@ -339,7 +349,7 @@ void drawServing() {
     
     std::string url = "http://" + app.ip + ":" + std::to_string(SERVER_PORT);
     if (blink_state) {
-        drawText(font_texture, cdata, "TRUY CAP: " + url, 20, 80, {COLOR_TEXT_YELLOW});
+        drawText(font_texture, cdata, "ACCESS URL: " + url, 20, 80, {COLOR_TEXT_YELLOW});
     }
     
     drawText(font_texture, cdata, "--- REQUEST LOG ---", 20, 120, {COLOR_TEXT_CYAN});
