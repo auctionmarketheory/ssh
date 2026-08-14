@@ -90,23 +90,32 @@ import io
 import urllib.parse
 
 PORT = 8000
-ROMS_DIR = '/storage/roms' if os.path.exists('/storage/roms') else ('/roms' if os.path.exists('/roms') else '/tmp/roms')
-if not os.path.exists(ROMS_DIR):
-    os.makedirs(ROMS_DIR)
-os.chdir(ROMS_DIR)
+# Serve from /storage root to allow browsing all folders like 351files
+ROOT_DIR = '/storage' if os.path.exists('/storage') else ('/roms' if os.path.exists('/roms') else '/tmp')
+os.chdir(ROOT_DIR)
+
+# Tiny 1x1 transparent GIF for favicon
+FAVICON = bytes([
+    0x47,0x49,0x46,0x38,0x39,0x61,0x01,0x00,0x01,0x00,0x80,0x00,0x00,
+    0xff,0x00,0xff,0x00,0x00,0x00,0x21,0xf9,0x04,0x00,0x00,0x00,0x00,
+    0x00,0x2c,0x00,0x00,0x00,0x00,0x01,0x00,0x01,0x00,0x00,0x02,0x02,
+    0x44,0x01,0x00,0x3b
+])
 
 class ROMUploadHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         print(f"[{self.command}] {self.path} {args[1]}", flush=True)
 
     def do_GET(self):
-        if self.path.startswith('/?'):
-            # Clear query string from URL for clean navigation
-            self.send_response(301)
-            self.send_header('Location', self.path.split('?')[0])
+        # Handle favicon - return tiny GIF
+        if self.path == '/favicon.ico':
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/gif')
+            self.send_header('Content-Length', str(len(FAVICON)))
             self.end_headers()
+            self.wfile.write(FAVICON)
             return
-            
+
         f = self.send_head()
         if f:
             try:
@@ -166,7 +175,8 @@ class ROMUploadHandler(http.server.SimpleHTTPRequestHandler):
                 rel_path = urllib.parse.unquote(self.path)
                 if rel_path.startswith('/'):
                     rel_path = rel_path[1:]
-                dest_dir = os.path.join(ROMS_DIR, rel_path) if rel_path else ROMS_DIR
+                # Save to the actual directory being browsed (absolute path)
+                dest_dir = os.path.join(ROOT_DIR, rel_path) if rel_path else ROOT_DIR
                 if not os.path.exists(dest_dir):
                     os.makedirs(dest_dir)
                 filepath = os.path.join(dest_dir, os.path.basename(filename))
@@ -189,42 +199,69 @@ class ROMUploadHandler(http.server.SimpleHTTPRequestHandler):
         except OSError:
             self.send_error(404, 'No permission to list directory')
             return None
-        entries.sort(key=lambda a: a.lower())
         
-        displaypath = html.escape(urllib.parse.unquote(self.path))
+        # Separate dirs and files, sort each
+        dirs = sorted([e for e in entries if os.path.isdir(os.path.join(path, e))], key=str.lower)
+        files = sorted([e for e in entries if not os.path.isdir(os.path.join(path, e))], key=str.lower)
+        entries = dirs + files
+        
+        currentpath = urllib.parse.unquote(self.path)
+        
+        # Build breadcrumb
+        breadcrumb = '<a href="/" style="color:#00ffff">&#127968; /storage</a>'
+        parts = [p for p in currentpath.split('/') if p]
+        cumulative = ''
+        for part in parts:
+            cumulative += '/' + part
+            breadcrumb += f' / <a href="{urllib.parse.quote(cumulative)}/" style="color:#00ffff">{html.escape(part)}</a>'
         
         content = '<!DOCTYPE html><html><head>'
         content += '<meta charset="utf-8">'
-        content += '<title>ROM Transfer</title>'
+        content += '<title>ROM Transfer - ' + html.escape(currentpath) + '</title>'
         content += '<meta name="viewport" content="width=device-width, initial-scale=1">'
         content += '<style>'
-        content += 'body{font-family:sans-serif;background:#2D2D2D;color:white;padding:20px;}'
+        content += 'body{font-family:monospace;background:#0d0d1a;color:#e0e0ff;padding:10px;margin:0;}'
+        content += 'h2{color:#00ffff;margin:0 0 5px 0;font-size:14px;}'
+        content += '.breadcrumb{background:#1a1a2e;padding:8px 10px;margin-bottom:10px;font-size:13px;border-left:3px solid #00ffff;}'
         content += 'a{color:#00ffff;text-decoration:none;}a:hover{color:#ff00ff;}'
-        content += '.upload-box{background:#444;padding:15px;margin-bottom:20px;border:2px dashed #00ffff;}'
-        content += 'li{padding:8px 0;border-bottom:1px solid #555;list-style:none;}'
-        content += 'ul{padding-left:0;}'
-        content += 'input[type=submit]{background:#00ffff;border:none;padding:10px;font-weight:bold;cursor:pointer;}'
+        content += '.upload-box{background:#1a1a2e;padding:10px;margin-bottom:10px;border:1px dashed #00ffff;font-size:13px;}'
+        content += '.upload-box input[type=file]{color:white;font-size:12px;}'
+        content += 'input[type=submit]{background:#00ffff;color:#000;border:none;padding:6px 12px;font-weight:bold;cursor:pointer;margin-top:5px;}'
+        content += 'table{width:100%;border-collapse:collapse;font-size:13px;}'
+        content += 'tr:hover{background:#1a1a2e;}'
+        content += 'td{padding:6px 4px;border-bottom:1px solid #222;}'
+        content += 'td:last-child{color:#888;text-align:right;white-space:nowrap;}'
+        content += '.dir{color:#ffe066;}'
         content += '</style></head><body>'
-        content += f'<h2>&#128193; {displaypath}</h2>'
+        content += '<div class="breadcrumb">' + breadcrumb + '</div>'
         content += f'<div class="upload-box">'
-        content += f'<form enctype="multipart/form-data" method="post" action="{self.path}">'
-        content += '<input type="file" name="file" required><br><br>'
-        content += '<input type="submit" value="UPLOAD HERE">'
+        content += f'<form enctype="multipart/form-data" method="post" action="{html.escape(self.path)}">'
+        content += '<input type="file" name="file" required> '
+        content += '<input type="submit" value="&#11014; Upload Here">'
         content += '</form></div>'
-        content += '<ul>'
-        if self.path != '/':
-            content += '<li><a href="..">&#11014; [Parent Directory]</a></li>'
+        content += '<table>'
+        if currentpath not in ('/', ''):
+            content += '<tr><td><a href="../">&#11014; ..</a></td><td></td></tr>'
         for name in entries:
             fullname = os.path.join(path, name)
             displayname = html.escape(name)
             linkname = urllib.parse.quote(name)
             if os.path.isdir(fullname):
-                displayname = '&#128193; ' + displayname + '/'
-                linkname = linkname + '/'
+                size_str = ''
+                content += f'<tr><td><span class="dir">&#128193;</span> <a href="{linkname}/" class="dir">{displayname}/</a></td><td>{size_str}</td></tr>'
             else:
-                displayname = '&#128196; ' + displayname
-            content += f'<li><a href="{linkname}">{displayname}</a></li>'
-        content += '</ul></body></html>'
+                try:
+                    size = os.path.getsize(fullname)
+                    if size > 1048576:
+                        size_str = f'{size//1048576} MB'
+                    elif size > 1024:
+                        size_str = f'{size//1024} KB'
+                    else:
+                        size_str = f'{size} B'
+                except:
+                    size_str = ''
+                content += f'<tr><td>&#128196; <a href="{linkname}">{displayname}</a></td><td>{size_str}</td></tr>'
+        content += '</table></body></html>'
         
         encoded = content.encode('utf-8')
         f = io.BytesIO(encoded)
