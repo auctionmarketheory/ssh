@@ -85,7 +85,8 @@ import http.server
 import socketserver
 import os
 import sys
-import cgi
+import html
+import io
 import urllib.parse
 
 PORT = 8000
@@ -115,92 +116,121 @@ class ROMUploadHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            form = cgi.FieldStorage(
-                fp=self.rfile,
-                headers=self.headers,
-                environ={'REQUEST_METHOD': 'POST',
-                         'CONTENT_TYPE': self.headers['Content-Type'],
-                         }
-            )
+            length = int(self.headers.get('Content-Length', 0))
+            content_type = self.headers.get('Content-Type', '')
             
-            if 'file' in form:
-                file_item = form['file']
-                if file_item.filename:
-                    # Save to current requested directory
-                    rel_path = urllib.parse.unquote(self.path)
-                    if rel_path.startswith('/'):
-                        rel_path = rel_path[1:]
-                    
-                    dest_dir = os.path.join(ROMS_DIR, rel_path)
-                    if not os.path.exists(dest_dir):
-                        os.makedirs(dest_dir)
-                        
-                    filename = os.path.basename(file_item.filename)
-                    filepath = os.path.join(dest_dir, filename)
-                    
-                    with open(filepath, 'wb') as fout:
-                        while True:
-                            chunk = file_item.file.read(8192)
-                            if not chunk:
-                                break
-                            fout.write(chunk)
-                    
-                    size_kb = os.path.getsize(filepath) // 1024
-                    print(f"Uploaded: {filename} ({size_kb}KB) to {rel_path}", flush=True)
+            if 'multipart/form-data' not in content_type:
+                self.send_response(400)
+                self.end_headers()
+                return
+            
+            # Parse boundary
+            boundary = ''
+            for part in content_type.split(';'):
+                part = part.strip()
+                if part.startswith('boundary='):
+                    boundary = part[9:].strip()
+                    break
+            
+            if not boundary:
+                self.send_response(400)
+                self.end_headers()
+                return
+            
+            raw_data = self.rfile.read(length)
+            
+            # Find filename
+            filename = ''
+            file_data = b''
+            boundary_bytes = ('--' + boundary).encode()
+            parts = raw_data.split(boundary_bytes)
+            for part in parts:
+                if b'filename="' in part:
+                    header_end = part.find(b'\r\n\r\n')
+                    if header_end == -1:
+                        continue
+                    headers_raw = part[:header_end].decode('utf-8', errors='replace')
+                    body = part[header_end+4:]
+                    if body.endswith(b'\r\n'):
+                        body = body[:-2]
+                    # Extract filename
+                    for h in headers_raw.split('\r\n'):
+                        if 'filename="' in h:
+                            start = h.find('filename="') + 10
+                            end = h.find('"', start)
+                            filename = h[start:end]
+                    file_data = body
+                    break
+            
+            if filename and file_data:
+                rel_path = urllib.parse.unquote(self.path)
+                if rel_path.startswith('/'):
+                    rel_path = rel_path[1:]
+                dest_dir = os.path.join(ROMS_DIR, rel_path) if rel_path else ROMS_DIR
+                if not os.path.exists(dest_dir):
+                    os.makedirs(dest_dir)
+                filepath = os.path.join(dest_dir, os.path.basename(filename))
+                with open(filepath, 'wb') as fout:
+                    fout.write(file_data)
+                size_kb = os.path.getsize(filepath) // 1024
+                print(f'Uploaded: {os.path.basename(filename)} ({size_kb}KB)', flush=True)
             
             self.send_response(303)
             self.send_header('Location', self.path)
             self.end_headers()
         except Exception as e:
-            print(f"Error: {e}", flush=True)
+            print(f'Error: {e}', flush=True)
             self.send_response(500)
             self.end_headers()
 
     def list_directory(self, path):
         try:
-            list = os.listdir(path)
+            entries = os.listdir(path)
         except OSError:
-            self.send_error(404, "No permission to list directory")
+            self.send_error(404, 'No permission to list directory')
             return None
-        list.sort(key=lambda a: a.lower())
+        entries.sort(key=lambda a: a.lower())
         
-        displaypath = cgi.escape(urllib.parse.unquote(self.path))
+        displaypath = html.escape(urllib.parse.unquote(self.path))
         
-        f = open('/tmp/html_resp.html', 'w', encoding='utf-8')
-        f.write('<!DOCTYPE html><html><head><title>ROM Transfer</title>')
-        f.write('<meta name="viewport" content="width=device-width, initial-scale=1">')
-        f.write('<style>body{font-family:sans-serif; background:#2D2D2D; color:white; padding:20px;} ')
-        f.write('a{color:#00ffff; text-decoration:none;} a:hover{color:#ff00ff;} ')
-        f.write('.upload-box{background:#444; padding:15px; margin-bottom:20px; border:2px dashed #00ffff;} ')
-        f.write('li{padding:8px 0; border-bottom:1px solid #555; list-style:none;} ')
-        f.write('ul{padding-left:0;}</style></head><body>')
-        f.write(f'<h2>📁 {displaypath}</h2>')
-        
-        f.write('<div class="upload-box">')
-        f.write(f'<form enctype="multipart/form-data" method="post" action="{self.path}">')
-        f.write('<input type="file" name="file" required><br><br>')
-        f.write('<input type="submit" value="UPLOAD TAI DAY" style="background:#00ffff; border:none; padding:10px; font-weight:bold; cursor:pointer;">')
-        f.write('</form></div>')
-        
-        f.write('<ul>')
+        content = '<!DOCTYPE html><html><head>'
+        content += '<meta charset="utf-8">'
+        content += '<title>ROM Transfer</title>'
+        content += '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        content += '<style>'
+        content += 'body{font-family:sans-serif;background:#2D2D2D;color:white;padding:20px;}'
+        content += 'a{color:#00ffff;text-decoration:none;}a:hover{color:#ff00ff;}'
+        content += '.upload-box{background:#444;padding:15px;margin-bottom:20px;border:2px dashed #00ffff;}'
+        content += 'li{padding:8px 0;border-bottom:1px solid #555;list-style:none;}'
+        content += 'ul{padding-left:0;}'
+        content += 'input[type=submit]{background:#00ffff;border:none;padding:10px;font-weight:bold;cursor:pointer;}'
+        content += '</style></head><body>'
+        content += f'<h2>&#128193; {displaypath}</h2>'
+        content += f'<div class="upload-box">'
+        content += f'<form enctype="multipart/form-data" method="post" action="{self.path}">'
+        content += '<input type="file" name="file" required><br><br>'
+        content += '<input type="submit" value="UPLOAD HERE">'
+        content += '</form></div>'
+        content += '<ul>'
         if self.path != '/':
-            f.write('<li><a href="..">⬆️ [Thu muc cha]</a></li>')
-        for name in list:
+            content += '<li><a href="..">&#11014; [Parent Directory]</a></li>'
+        for name in entries:
             fullname = os.path.join(path, name)
-            displayname = linkname = name
+            displayname = html.escape(name)
+            linkname = urllib.parse.quote(name)
             if os.path.isdir(fullname):
-                displayname = "📁 " + name + "/"
-                linkname = name + "/"
+                displayname = '&#128193; ' + displayname + '/'
+                linkname = linkname + '/'
             else:
-                displayname = "📄 " + name
-            f.write(f'<li><a href="{urllib.parse.quote(linkname)}">{cgi.escape(displayname)}</a></li>')
-        f.write('</ul></body></html>')
-        f.close()
+                displayname = '&#128196; ' + displayname
+            content += f'<li><a href="{linkname}">{displayname}</a></li>'
+        content += '</ul></body></html>'
         
-        f = open('/tmp/html_resp.html', 'rb')
+        encoded = content.encode('utf-8')
+        f = io.BytesIO(encoded)
         self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(os.path.getsize('/tmp/html_resp.html')))
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(encoded)))
         self.end_headers()
         return f
 
